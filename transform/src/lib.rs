@@ -16,7 +16,7 @@ use {
         Function, FunctionSection, GlobalSection, GlobalType, ImportSection, InstanceSection,
         Instruction as Ins, MemArg, MemorySection, Module, ModuleArg, ModuleSection,
         NestedComponentSection, PrimitiveValType, RawSection, TypeSection, ValType,
-        reencode::{Reencode, RoundtripReencoder as Encode},
+        reencode::{Reencode, RoundtripReencoder as Encode, component_utils},
     },
     wasmparser::{
         CanonicalFunction, ComponentAlias, ComponentExternalKind, ComponentTypeRef, ExternalKind,
@@ -43,8 +43,9 @@ pub trait Invoker {
 pub async fn initialize(
     component: &[u8],
     initialize: impl FnOnce(Vec<u8>) -> BoxFuture<'static, Result<Box<dyn Invoker>>>,
+    erase_export_func: impl FnMut(&str) -> bool,
 ) -> Result<Vec<u8>> {
-    initialize_staged(component, None, initialize).await
+    initialize_staged(component, None, initialize, erase_export_func).await
 }
 
 pub type Stage2Map<'a> = Option<(&'a [u8], &'a dyn Fn(u32) -> u32)>;
@@ -54,6 +55,7 @@ pub async fn initialize_staged(
     component_stage1: &[u8],
     component_stage2_and_map_module_index: Stage2Map<'_>,
     initialize: impl FnOnce(Vec<u8>) -> BoxFuture<'static, Result<Box<dyn Invoker>>>,
+    erase_export_func: impl FnMut(&str) -> bool,
 ) -> Result<Vec<u8>> {
     // First, instrument the input component, validating that it conforms to certain rules and exposing the memory
     // and all mutable globals via synthesized function exports.
@@ -89,6 +91,7 @@ pub async fn initialize_staged(
         measurement,
         component_stage1,
         component_stage2_and_map_module_index,
+        erase_export_func,
     )
 }
 
@@ -733,6 +736,7 @@ fn apply(
     measurement: Measurement,
     component_stage1: &[u8],
     component_stage2_and_map_module_index: Stage2Map<'_>,
+    mut erase_export_func: impl FnMut(&str) -> bool,
 ) -> Result<Vec<u8>> {
     let (component_stage2, map_module_index) =
         component_stage2_and_map_module_index.unwrap_or((component_stage1, &convert::identity));
@@ -841,6 +845,27 @@ fn apply(
                 }
 
                 initialized_component.section(&ModuleSection(&initialized_module));
+            }
+
+            Payload::ComponentExportSection(reader) => {
+                let mut exports = wasm_encoder::ComponentExportSection::new();
+                for export in reader {
+                    let export = export?;
+                    if matches!(export.kind, ComponentExternalKind::Func)
+                        && !erase_export_func(export.name.0)
+                    {
+                        exports.export(
+                            export.name.0,
+                            component_utils::component_export_kind(&mut Encode, export.kind),
+                            export.index,
+                            export
+                                .ty
+                                .map(|ty| component_utils::component_type_ref(&mut Encode, ty))
+                                .transpose()?,
+                        );
+                    }
+                }
+                initialized_component.section(&exports);
             }
 
             _ => copy_component_section(section, component_stage2, &mut initialized_component),

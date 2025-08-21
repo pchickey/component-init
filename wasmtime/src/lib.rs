@@ -6,15 +6,19 @@ use wasmtime::{
 };
 
 pub async fn initialize(component: &[u8]) -> Result<Vec<u8>> {
-    component_init_transform::initialize(component, |instrumented| {
-        Box::pin(async move {
-            let i = invoker(instrumented)
-                .await
-                .context("running instrumented component")?;
-            let i: Box<dyn Invoker> = Box::new(i);
-            Ok(i)
-        })
-    })
+    component_init_transform::initialize(
+        component,
+        |instrumented| {
+            Box::pin(async move {
+                let i = invoker(instrumented)
+                    .await
+                    .context("running instrumented component")?;
+                let i: Box<dyn Invoker> = Box::new(i);
+                Ok(i)
+            })
+        },
+        |name| name == "component-init",
+    )
     .await
 }
 
